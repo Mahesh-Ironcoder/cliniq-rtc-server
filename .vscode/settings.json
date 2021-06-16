@@ -1,0 +1,12 @@
+{
+    "python.analysis.extraPaths": [
+        "F:\\Internship\\CHT\\main\\cliniqRN\\RTCServer\\envs\\Lib\\site-packages\\aiortc"
+    ],
+    "python.autoComplete.extraPaths": [
+        "F:\\Internship\\CHT\\main\\cliniqRN\\RTCServer\\envs\\Lib\\site-packages\\aiortc",
+        "F:\\Internship\\CHT\\main\\cliniqRN\\RTCServer\\envs\\Lib\\site-packages\\aioice"
+
+    ],
+    "python.pythonPath": "F:\\Internship\\CHT\\main\\cliniqRN\\RTCServer\\envs\\python.exe",
+    "python.formatting.provider": "none"
+}
