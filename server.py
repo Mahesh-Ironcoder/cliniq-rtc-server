@@ -1,4 +1,6 @@
+import asyncio
 from asyncio.tasks import ensure_future
+from concurrent import futures
 import json
 from aiohttp import web, ClientSession, WSMsgType, client_exceptions
 from aiortc import (
@@ -19,13 +21,16 @@ from io import BytesIO
 import time
 from flask.globals import session
 
+FRAMES_TO_SEND = 350
+
 logger = logging.getLogger("pc")
+ROOT = os.path.dirname(__file__)
+
 ws = None
 pc = None
-ROOT = os.path.dirname(__file__)
-logger = logging.getLogger("pc")
 channel = None
 session = None
+
 
 connections = {}
 
@@ -34,12 +39,9 @@ class FrameGrabber(MediaStreamTrack):
     kind = "video"
     
     def __init__(self, track):
-        super().__init__()  # don't forget this!
+        super().__init__() 
         self.track = track
         self._count = 0
-        # self.face_cascade = cv2.CascadeClassifier(
-        #     os.path.join(ROOT, "res/haarcascade_frontalface_default.xml")
-        # )
 
     def draw_face_detections(self, frame):
         cvImg = frame.to_ndarray(format="rgb24")
@@ -52,23 +54,25 @@ class FrameGrabber(MediaStreamTrack):
     async def recv(self):
         frame = await self.track.recv()
         try:
-            if self._count < 350:
+            if self._count < FRAMES_TO_SEND:
                 print("Count: ", self._count)
                 ensure_future(self.getData(frame))
+            elif self._count == FRAMES_TO_SEND:
+                print("Last count: ", self._count)
+                ensure_future(self.getData(frame,True))
             self._count += 1;
         except CancelledError as e:
             print("The Task carry out the request failed: ", e.args)
         except client_exceptions.ClientConnectorError as cce:
             print("Cannot connect to remote client: ",cce.strerror)
+        except Exception as e:
+            print("Exception in recv frames...", e.args)
         return frame
 
-    async def getData(self, frame):
+    async def getData(self, frame, isLast = False):
         base64Str = self.convert_frame_to_base64(frame)
-        result = await self.fetchVitalsData(base64Str)
-        # print("Result ====> ")
-        # print(result)
+        result = await self.fetchVitalsData(base64Str,isLast)
         await ws.send_json({"type":"result", "result": result})
-        
 
     def convert_frame_to_base64(self,frame: VideoFrame):
         img = frame.to_image()
@@ -77,9 +81,25 @@ class FrameGrabber(MediaStreamTrack):
         binary_data = output_buffer.getvalue()
         base64_str = base64.b64encode(binary_data)
         return base64_str
+    
+    async def fetchVitalsData(self,imgStr, lastFrame):
+        print("sending request with image string: ", imgStr[0:15])
+        if lastFrame:
+            reqBody = {"id": 1,"name": "something","pms": "uk","status": 0,"photo": imgStr.decode("utf-8"),}
+        else:
+            reqBody = {"id": 1,"name": "something","pms": "uk","status": 1,"photo": imgStr.decode("utf-8"),
+            }
+        async with session.post("http://15.207.11.162:8500/data/uploadPhoto", json=reqBody) as resp:
+            if resp.ok:
+                smtg = await resp.text("utf8")
+                # print("response body: ", smtg)
+                return smtg
+            print("Request error from api %d".format(resp.status))
+            return "Request error from api %d".format(resp.status)
 
 
-    async def fetchVitalsData(self,imgStr):
+
+"""     async def fetchVitalsData(self,imgStr):
         print("sending request with image string: ", imgStr[0:15])
         reqBody = {
             "id": 1,
@@ -88,13 +108,14 @@ class FrameGrabber(MediaStreamTrack):
             "status": 1,
             "photo": imgStr.decode("utf-8"),
         }
-        async with session.post("http://15.207.11.162:8500/data/uploadPhoto", json=reqBody) as resp:
+        async with session.get("https://jsonplaceholder.typicode.com/users") as resp:
             if resp.ok:
                 smtg = await resp.text("utf8")
                 # print("response body: ", smtg)
                 return smtg
             print("Request error from api %d".format(resp.status))
-            return "Request error from api %d".format(resp.status)
+            return "Request error from api %d".format(resp.status) """
+
 
 def log_info(msgType, msg):
     print(">>>>",time.strftime("%D-%H:%M:%S"),"  ", msgType," =>", msg)
@@ -106,7 +127,6 @@ async def handle_offer(peer: RTCPeerConnection,osdp, otype):
     answer = await peer.createAnswer()
     await peer.setLocalDescription(answer)
     await ws.send_json({"type": answer.type, "sdp": answer.sdp})
-    
 
 def candidate_from_req(iceCandidate):
     bits = iceCandidate["candidate"].split()
@@ -153,27 +173,26 @@ def candidate_to_req(cand:RTCIceCandidate):
 
 async def handle_ice(peer: RTCPeerConnection, cand):
     candidate = candidate_from_req(cand)
-    # RTCIceCandidate()
     print("ICE Candidate", candidate.sdpMLineIndex)
     await peer.addIceCandidate(candidate)
-    # ice_candidate = sdp.candidate_from_sdp(peer.localDescription.sdp);
-    # iceCand = candidate_to_req(ice_candidate);
-    # ws.send_json({"type": "iceCandidate", "IceCandidate": iceCand})
 
 async def wsHandler(req):
     global ws,pc, session, connections
     origin =  req.headers["Origin"]
     if origin in connections.keys():
-        print("Reusing the existing connetion for: ", origin)
-        # await connections[origin].close()
+        print("closing the existing connetion for: ", origin)
+        await connections[origin]["session"].close()
+        await connections[origin]["pc"].close()
+        await connections[origin]["ws"].close()
+        
         # ws=connections[origin]
-        return
-    else:
-        print("Creating the new connection for: ",origin)
-        ws = web.WebSocketResponse()
-        connections[origin] = ws
+    # else:
+    print("Creating the new connection for: ",origin)
+    ws = web.WebSocketResponse()
+    connections[origin] = {"ws": ws}
     
-    if  not ws.prepared:
+    
+    if not ws.prepared:
         print("Preparing the connection for ", origin)
         await ws.prepare(req)
     print("Connections existing are: ",connections)
@@ -191,20 +210,18 @@ async def wsHandler(req):
                     pc = RTCPeerConnection(config)
                     session = ClientSession()
                     
+                    connections[origin]["session"]=session
+                    connections[origin]["pc"] = pc
+                    
                     @pc.on("track")
                     def on_track(track):
-                        print("Got track...")
+                        print("Got track from origin")
                         if track.kind == "video":
-                            localStream = FrameGrabber(track)
-                            pc.addTrack(localStream)
-                    
-                    @pc.on("stream")
-                    def on_stream(stream):
-                        print("Got stream...")
+                            lot = FrameGrabber(track)
+                            pc.addTrack(lot)
                     
                     await handle_offer(pc, body["sdp"], body["Msgtype"]);
                 if body["Msgtype"] == "ice" and pc is not None:
-                    # print("Ice is: ", body["IceCandidate"])
                     await handle_ice(pc, body["IceCandidate"]);
         
         elif msg.type == WSMsgType.ERROR:
@@ -252,5 +269,4 @@ if __name__ == "__main__":
     app = web.Application()
     app.on_shutdown.append(on_shutdown)
     app.router.add_get("/ws", wsHandler)
-    web.run_app(app, access_log=None, host=args.host,
-                port=args.port, ssl_context=ssl_context, )
+    web.run_app(app, access_log = None, host = args.host, port = args.port, ssl_context = ssl_context, )
