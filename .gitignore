@@ -1,2 +1,5 @@
 #python environment
 envs/
+
+#vscode workspace
+.vscode/
