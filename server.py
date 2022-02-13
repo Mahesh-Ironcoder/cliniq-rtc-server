@@ -181,9 +181,12 @@ async def wsHandler(req):
     origin =  req.headers["Origin"]
     if origin in connections.keys():
         print("closing the existing connetion for: ", origin)
-        await connections[origin]["session"].close()
-        await connections[origin]["pc"].close()
-        await connections[origin]["ws"].close()
+        if connections[origin].get("session"):
+            await connections[origin]["session"].close()
+        if connections[origin].get("pc"):
+            await connections[origin]["pc"].close()
+        if connections[origin].get("ws"):
+            await connections[origin]["ws"].close()
         
         # ws=connections[origin]
     # else:
